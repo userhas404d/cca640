@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Provisions an instance profile, service role, and opsworks stack for use with
+  project 2 
+
+Resources:
+
+  # name intentionally omitted to allow cfn to dynamically generate it
+  rOpsWorksCookbookBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: PublicRead
+
+  rOpsWorksCookbookBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Id: PublicAccess
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal:
+              # ensure public access is only open to the caller's account
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 's3:GetObject'
+            Resource: !Sub "arn:aws:s3:::${rOpsWorksCookbookBucket}/*"
+      Bucket: !Ref rOpsWorksCookbookBucket
+
+  # avoid having to deal with iam user creds and just allow s3 read on the opsworks default instance profile
+  rOpsWorksInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: >-
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ec2.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        }
+      Description: Role used by instances provisioned in the cca640 OpsWorks stack
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      RoleName: cca640-instance-role
+
+  rOpsWorksInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      InstanceProfileName: cca640-instance-profile
+      Roles: 
+        - !Ref rOpsWorksInstanceRole
+
+  rOpsWorksServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: >-
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "opsworks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        }
+      Description: Allows the cca640 OpsWorks stack to make api calls on our behalf
+      Policies:
+        - 
+          PolicyDocument: >-
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "cloudwatch:DescribeAlarms",
+                    "cloudwatch:GetMetricStatistics",
+                    "ec2:*",
+                    "ecs:*",
+                    "elasticloadbalancing:*",
+                    "iam:GetRolePolicy",
+                    "iam:ListInstanceProfiles",
+                    "iam:ListRoles",
+                    "iam:ListUsers",
+                    "rds:*"
+                  ],
+                  "Resource": [
+                    "*"
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:PassRole"
+                  ],
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "iam:PassedToService": "ec2.amazonaws.com"
+                    }
+                  }
+                }
+              ]
+            }
+          PolicyName: cca640-opsworks-service-policy
+      RoleName: cca640-opsworks-service-role
+
+  rOpsWorksStack:
+    Type: AWS::OpsWorks::Stack
+    DependsOn: rOpsWorksServiceRole 
+    Properties: 
+      ConfigurationManager:
+        Name: Chef
+        Version: 12.2
+      DefaultInstanceProfileArn: !GetAtt rOpsWorksInstanceProfile.Arn
+      DefaultOs: Microsoft Windows Server 2012 R2 Base
+      DefaultRootDeviceType: instance-store
+      Name: cca640
+      ServiceRoleArn: !GetAtt rOpsWorksServiceRole.Arn
+      UseCustomCookbooks: True
+      CustomCookbooksSource: 
+        Type: s3
+        Url: !Sub "https://${rOpsWorksCookbookBucket.DomainName}/iis-cookbook.zip"
+
+  rOpsWorksLayer:
+    Type: AWS::OpsWorks::Layer
+    Properties:
+      Name: IISExample-CCA640
+      Shortname: iisexample-cca640
+      Type: custom
+      CustomRecipes:
+        Setup: [ iis-cookbook::install ]
+        Deploy: [ iis-cookbook::deploy ]
+      StackId: !Ref rOpsWorksStack
+      EnableAutoHealing: True
+      AutoAssignElasticIps: False
+      AutoAssignPublicIps: True
+
+  rOpsWorksApplication:
+    Type: AWS::OpsWorks::App
+    Properties:
+      Name: IIS-Example-App-CCA640
+      Type: other
+      AppSource:
+        Type: other
+      DataSources:
+        -
+          Type: None
+      StackId: !Ref rOpsWorksStack
+      Environment:
+        -
+          Key: S3REGION
+          Value: !Sub "${AWS::Region}"
+        -
+          Key: BUCKET
+          Value: !Sub "${rOpsWorksCookbookBucket}"
+        -
+          Key: FILENAME
+          Value: "default.htm"
+
+Outputs:
+  oOpsWorksCookbookBucket:
+    Description: The name of the s3 bucket in which to place additional Chef cookbooks
+    Value: !GetAtt rOpsWorksCookbookBucket.Arn
